@@ -303,8 +303,17 @@ def save_last_db(path: Path):
         pass
 
 def auto_load():
-    """Load database on startup — prefer the last file the user uploaded."""
-    # 1. Try the remembered file first
+    """Load database on startup — prefer bundled database.csv, then last uploaded file."""
+    # 1. Always try the bundled database first (committed to the repo)
+    for bundled_name in ("database.csv", "database.xlsx", "database.xls"):
+        bundled = BASE_DIR / bundled_name
+        if bundled.exists():
+            ok, msg = load_file(bundled)
+            if ok:
+                print(f"[auto-load] {msg} from {bundled_name} (bundled)")
+                return
+
+    # 2. Try the remembered uploaded file
     if LAST_DB_FILE.exists():
         remembered = Path(LAST_DB_FILE.read_text(encoding="utf-8").strip())
         if remembered.exists():
@@ -313,7 +322,7 @@ def auto_load():
                 print(f"[auto-load] {msg} from {remembered.name} (remembered)")
                 return
 
-    # 2. Fall back to first file found in the folder
+    # 3. Fall back to first file found in the folder
     candidates = (
         sorted(BASE_DIR.glob("*.csv"))
         + sorted(BASE_DIR.glob("*.xlsx"))
