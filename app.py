@@ -455,7 +455,16 @@ def admin_upload():
         traceback.print_exc()
         return jsonify({"ok": False, "error": f"Server error: {e}"})
 
-
+@app.route("/debug")
+def debug():
+    import os
+    files = list(BASE_DIR.glob("*"))
+    return jsonify({
+        "base_dir": str(BASE_DIR),
+        "files": [str(f.name) for f in files],
+        "db_loaded": len(DB) > 0,
+        "db_rows": len(NUMERIC_INDEX)
+    })
 if __name__ == "__main__":
     import os, socket
     port = int(os.environ.get("PORT", 5001))
