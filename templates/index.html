@@ -252,10 +252,7 @@
     }
 
     function showDbStatus(info) {
-      const el = document.getElementById("db-status");
-      el.className = "loaded";
-      el.style.display = "block";
-      el.innerHTML = `<strong>📊 ${esc(info.filename)}</strong> &nbsp;·&nbsp; ${info.rows} posts &nbsp;·&nbsp; loaded ${esc(info.loaded_at)}`;
+      // DB status intentionally hidden from UI
     }
 
     async function doSearch() {
