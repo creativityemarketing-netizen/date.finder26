@@ -156,6 +156,22 @@
     .error-msg  { color: #c53030; font-weight: 600; }
     .error-hint { color: #999; font-size: .85rem; margin-top: 6px; }
 
+    /* Upload */
+    #file-input { display: none; }   /* hidden — triggered by the label */
+    .upload-label {
+      display: block;
+      border: 2px dashed #e0e0e0; border-radius: 12px; padding: 20px;
+      text-align: center; cursor: pointer; transition: border-color .2s, background .2s;
+    }
+    .upload-label:hover,
+    .upload-label.drag-over { border-color: #dc2743; background: #fff5f7; }
+    .upload-icon { font-size: 2rem; margin-bottom: 6px; }
+    .upload-label p { color: #999; font-size: .88rem; }
+    .upload-label strong { color: #555; }
+
+    #db-status { margin-top: 14px; border-radius: 10px; padding: 12px 16px; font-size: .85rem; display: none; }
+    #db-status.loaded { background: #ebf8ff; border: 1px solid #90cdf4; color: #2b6cb0; }
+
     /* History */
     #history-section { display: none; }
     .history-list { list-style: none; }
@@ -189,7 +205,7 @@
       <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/>
     </svg>
     <h1>Instagram Date Finder</h1>
-    <p>Enter a Post ID to find its publication date</p>
+    <p>Exact match or estimated date range from your database</p>
   </div>
 
   <div class="card">
@@ -203,6 +219,21 @@
 
     <div id="result"></div>
 
+    <div class="divider"></div>
+
+    <div class="section-label">Database (Excel / CSV)</div>
+
+    <!-- Hidden input — label below triggers it on click -->
+    <input type="file" id="file-input" accept=".xlsx,.xls,.csv,.xls" />
+
+    <label for="file-input" class="upload-label" id="upload-label">
+      <div class="upload-icon">📂</div>
+      <p><strong>Click to upload</strong> or drag &amp; drop your file</p>
+      <p>.xlsx · .xls · .csv</p>
+    </label>
+
+    <div id="upload-status" style="display:none; margin-top:10px; padding:12px 16px; border-radius:10px; font-size:.9rem; text-align:center;"></div>
+    <div id="db-status"></div>
 
     <div class="divider" id="history-divider" style="display:none"></div>
     <div id="history-section">
@@ -216,10 +247,26 @@
     const history = [];
 
     window.addEventListener("DOMContentLoaded", () => {
+      fetchStats();
       document.getElementById("query").addEventListener("keydown", e => {
         if (e.key === "Enter") doSearch();
       });
     });
+
+    async function fetchStats() {
+      try {
+        const r = await fetch("/api/stats");
+        const d = await r.json();
+        if (d.filename) showDbStatus(d);
+      } catch (_) {}
+    }
+
+    function showDbStatus(info) {
+      const el = document.getElementById("db-status");
+      el.className = "loaded";
+      el.style.display = "block";
+      el.innerHTML = `<strong>📊 ${esc(info.filename)}</strong> &nbsp;·&nbsp; ${info.rows} posts &nbsp;·&nbsp; loaded ${esc(info.loaded_at)}`;
+    }
 
     async function doSearch() {
       const query = document.getElementById("query").value.trim();
@@ -293,7 +340,6 @@
     // ── Exact match ───────────────────────────────────────────────────────────
     function renderExact(el, d, query) {
       const date = d["_date_formatted"] || d["Published At"] || "—";
-      const url  = d["_url"] || d["Post URL"] || "";
 
       el.innerHTML = `
         <div class="result-box success">
@@ -302,23 +348,27 @@
           </div>
           <div style="font-size:.8rem;color:#888;margin-bottom:4px">ID: ${esc(query)}</div>
           <div class="result-date">📅 ${esc(date)}</div>
-          ${linkBox(url, "Open post ↗")}
         </div>`;
       addHistory(query, date, "exact");
     }
 
     // ── Range match ───────────────────────────────────────────────────────────
     function renderRange(el, d, query) {
+      // Show the post URL when we have a shortcode (covers URL-input searches)
+      const postUrl = d.generated_url || "";
+      const urlLine = postUrl
+        ? `<div style="margin-top:6px">${linkBox(postUrl, "Open ↗")}</div>`
+        : `<div style="font-size:.8rem;color:#888;margin-bottom:6px;margin-top:4px">ID: ${esc(String(d.numeric_id))}</div>`;
+
       el.innerHTML = `
         <div class="result-box warning">
           <div class="range-header">
             <span class="range-badge">⚡ Estimated range</span>
           </div>
-          <div style="font-size:.8rem;color:#888;margin-bottom:6px;margin-top:4px">ID: ${esc(String(d.numeric_id))}</div>
-          <div class="range-dates">
+          ${urlLine}
+          <div class="range-dates" style="margin-top:10px">
             <div class="range-label">📅 ${esc(d.range_label)}</div>
           </div>
-          ${d.generated_url ? linkBox(d.generated_url, "Open post ↗") : ""}
         </div>`;
 
       addHistory(query, d.range_label, "range");
@@ -344,6 +394,78 @@
     function reuse(i) {
       document.getElementById("query").value = history[i].query;
       doSearch();
+    }
+
+    // ── Upload ────────────────────────────────────────────────────────────────
+    // Wire the hidden input's change event
+    document.addEventListener("DOMContentLoaded", () => {
+      const input = document.getElementById("file-input");
+      if (input) input.addEventListener("change", () => uploadFile(input.files[0]));
+
+      // Drag-and-drop on the label
+      const label = document.getElementById("upload-label");
+      if (label) {
+        label.addEventListener("dragover",  e => { e.preventDefault(); label.classList.add("drag-over"); });
+        label.addEventListener("dragleave", e => { label.classList.remove("drag-over"); });
+        label.addEventListener("drop", e => {
+          e.preventDefault();
+          label.classList.remove("drag-over");
+          const file = e.dataTransfer.files[0];
+          if (file) uploadFile(file);
+        });
+      }
+    });
+
+    function setUploadStatus(icon, text, color) {
+      const el = document.getElementById("upload-status");
+      el.style.display = "block";
+      el.style.background = color === "green" ? "#f0fff4" : color === "red" ? "#fff5f5" : "#fffdf0";
+      el.style.border     = `1px solid ${color === "green" ? "#68d391" : color === "red" ? "#fc8181" : "#f6c90e"}`;
+      el.style.color      = color === "green" ? "#276749" : color === "red" ? "#c53030" : "#7a5f00";
+      el.innerHTML = `${icon} ${esc(text)}`;
+    }
+
+    async function uploadFile(file) {
+      if (!file) return;
+
+      const allowed = [".xlsx", ".xls", ".csv"];
+      const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+      if (!allowed.includes(ext)) {
+        setUploadStatus("❌", `Unsupported format: ${ext}. Use .xlsx, .xls or .csv`, "red");
+        return;
+      }
+
+      setUploadStatus("⏳", `Uploading ${file.name}…`, "yellow");
+
+      const form = new FormData();
+      form.append("file", file);
+
+      try {
+        const r = await fetch("/api/upload", { method: "POST", body: form });
+
+        // Parse response — server might return HTML on crash, handle gracefully
+        let d;
+        try {
+          d = await r.json();
+        } catch {
+          setUploadStatus("❌", `Server error (HTTP ${r.status}) — see the terminal window for details.`, "red");
+          return;
+        }
+
+        if (d.ok) {
+          showDbStatus(d.info);
+          setUploadStatus("✅", `${esc(file.name)} loaded — ${d.info.rows} posts indexed.`, "green");
+        } else {
+          setUploadStatus("❌", d.error || "Upload failed.", "red");
+        }
+      } catch (e) {
+        // Only reaches here on true network error (server unreachable)
+        setUploadStatus("❌", "Cannot reach the server. Make sure START.bat is running and the terminal is open.", "red");
+      }
+
+      // Reset the file input so the same file can be re-selected if needed
+      const input = document.getElementById("file-input");
+      if (input) input.value = "";
     }
 
     function esc(s) {

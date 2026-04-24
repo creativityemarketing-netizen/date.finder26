@@ -10,9 +10,8 @@ import bisect
 from pathlib import Path
 from datetime import datetime
 
-import os
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 
 # ─── App setup ───────────────────────────────────────────────────────────────
@@ -24,11 +23,8 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".csv"}
 
 app = Flask(__name__)
-app.secret_key                      = os.environ.get("SECRET_KEY", "change-this-in-production")
 app.config["MAX_CONTENT_LENGTH"]    = 50 * 1024 * 1024   # 50 MB max upload
 app.config["MAX_FORM_MEMORY_SIZE"]  = 50 * 1024 * 1024   # keep uploads in RAM, never spool to disk
-
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 # ─── In-memory database ───────────────────────────────────────────────────────
 
@@ -49,6 +45,18 @@ def numeric_id_to_shortcode(media_id: int) -> str:
         sc = alphabet[media_id % 64] + sc
         media_id //= 64
     return sc
+
+
+def shortcode_to_numeric_id(shortcode: str) -> int | None:
+    """Convert Instagram shortcode (base-64) back to numeric media ID."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    n = 0
+    for char in shortcode:
+        idx = alphabet.find(char)
+        if idx == -1:
+            return None
+        n = n * 64 + idx
+    return n
 
 
 def extract_shortcode(value: str) -> str | None:
@@ -303,17 +311,8 @@ def save_last_db(path: Path):
         pass
 
 def auto_load():
-    """Load database on startup — prefer bundled database.csv, then last uploaded file."""
-    # 1. Always try the bundled database first (committed to the repo)
-    for bundled_name in ("database.csv", "database.xlsx", "database.xls"):
-        bundled = BASE_DIR / bundled_name
-        if bundled.exists():
-            ok, msg = load_file(bundled)
-            if ok:
-                print(f"[auto-load] {msg} from {bundled_name} (bundled)")
-                return
-
-    # 2. Try the remembered uploaded file
+    """Load database on startup — prefer the last file the user uploaded."""
+    # 1. Try the remembered file first
     if LAST_DB_FILE.exists():
         remembered = Path(LAST_DB_FILE.read_text(encoding="utf-8").strip())
         if remembered.exists():
@@ -322,7 +321,7 @@ def auto_load():
                 print(f"[auto-load] {msg} from {remembered.name} (remembered)")
                 return
 
-    # 3. Fall back to any csv/xlsx in the folder
+    # 2. Fall back to first file found in the folder
     candidates = (
         sorted(BASE_DIR.glob("*.csv"))
         + sorted(BASE_DIR.glob("*.xlsx"))
@@ -366,8 +365,20 @@ def api_search():
     if result:
         return jsonify({"ok": True, "match": "exact", "data": result})
 
-    # 2. Try range search (fuzzy by numeric ID)
-    # First validate the numeric ID looks like a real Instagram ID (17-19 digits)
+    # 2. If the query is an Instagram URL, convert the shortcode to a numeric ID
+    #    and use that for the range search (avoids the "wrong digit count" error).
+    url_match = SHORTCODE_RE.search(query)
+    if url_match:
+        shortcode  = url_match.group(1)
+        numeric_id = shortcode_to_numeric_id(shortcode)
+        if numeric_id is not None:
+            range_result = search_range(str(numeric_id), n=1)
+            if range_result:
+                return jsonify({"ok": True, "match": "range", "data": range_result})
+        return jsonify({"ok": False, "error": "Post not found and no neighboring IDs could be estimated."})
+
+    # 3. Try range search (fuzzy by numeric ID)
+    # Validate the numeric ID looks like a real Instagram ID (19 digits)
     numeric_part = re.sub(r"[^0-9]", "", query.split("_")[0])
     if numeric_part and len(numeric_part) != 19:
         return jsonify({
@@ -383,33 +394,8 @@ def api_search():
     return jsonify({"ok": False, "error": "Post not found and no neighboring IDs could be estimated."})
 
 
-# ─── Admin routes ─────────────────────────────────────────────────────────────
-
-@app.route("/admin")
-def admin_page():
-    logged_in = session.get("admin") is True
-    return render_template("admin.html", logged_in=logged_in, db_info=DB_INFO if logged_in else {})
-
-
-@app.route("/admin/login", methods=["POST"])
-def admin_login():
-    if request.form.get("password", "") == ADMIN_PASSWORD:
-        session["admin"] = True
-        return redirect(url_for("admin_page"))
-    return render_template("admin.html", logged_in=False, error="Wrong password")
-
-
-@app.route("/admin/logout")
-def admin_logout():
-    session.pop("admin", None)
-    return redirect(url_for("admin_page"))
-
-
-@app.route("/admin/upload", methods=["POST"])
-def admin_upload():
-    if not session.get("admin"):
-        return jsonify({"ok": False, "error": "Unauthorized"}), 401
-
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
     try:
         if "file" not in request.files:
             return jsonify({"ok": False, "error": "No file provided"})
@@ -422,11 +408,13 @@ def admin_upload():
         if suffix not in ALLOWED_EXTENSIONS:
             return jsonify({"ok": False, "error": f"Unsupported format '{suffix}'. Use .xlsx, .xls or .csv"})
 
+        # Read into memory first — no disk space needed for the initial load
         file_bytes = f.read()
 
+        # Use a single fixed filename (overwrite old) to avoid filling the disk
         dest = UPLOAD_DIR / f"active_database{suffix}"
 
-        # Delete old database files to free space
+        # Delete any old database files in uploads/ to free space
         for old in UPLOAD_DIR.iterdir():
             if old.is_file() and old != dest:
                 try:
@@ -434,17 +422,20 @@ def admin_upload():
                 except Exception:
                     pass
 
+        # Load directly from memory
         ok, msg = load_file(Path(f"active_database{suffix}"), file_bytes=file_bytes)
         if not ok:
             return jsonify({"ok": False, "error": msg})
 
+        # Save one copy to disk for persistence across restarts
         try:
             dest.write_bytes(file_bytes)
             save_last_db(dest)
         except OSError:
+            # Disk still full — loaded in memory for this session, warn user
             return jsonify({
                 "ok":      True,
-                "message": msg + " (session only — disk full)",
+                "message": msg + " (loaded for this session only — disk full, cannot save permanently)",
                 "info":    DB_INFO
             })
 
@@ -452,34 +443,8 @@ def admin_upload():
 
     except Exception as e:
         import traceback
-        traceback.print_exc()
+        traceback.print_exc()          # prints full error in the terminal
         return jsonify({"ok": False, "error": f"Server error: {e}"})
-
-
-@app.route("/debug")
-def debug():
-    files = list(BASE_DIR.glob("*"))
-    return jsonify({
-        "base_dir": str(BASE_DIR),
-        "files": [str(f.name) for f in files],
-        "db_loaded": len(DB) > 0,
-        "db_rows": len(NUMERIC_INDEX)
-    })
-
-
-@app.route("/reload")
-def reload_db():
-    target = BASE_DIR / "database.csv"
-    if not target.exists():
-        return jsonify({"ok": False, "error": "database.csv not found", "base_dir": str(BASE_DIR)})
-    size = target.stat().st_size
-    ok, msg = load_file(target)
-    return jsonify({
-        "ok": ok,
-        "message": msg,
-        "file_size_bytes": size,
-        "db_rows": len(NUMERIC_INDEX)
-    })
 
 
 if __name__ == "__main__":
